@@ -19,7 +19,7 @@ class Content:
     filepath: str
     filesize: int
     timemodified: int
-    mimetype: Optional[str] = None  # Making mimetype optional
+    mimetype: Optional[str] = None
     timecreated: Optional[int] = None
     isexternalfile: Optional[bool] = None
 
@@ -38,8 +38,7 @@ class Module:
     completion: int
     url: Optional[str] = None # Sometimes its missing, bc some courses write a short intro text at the beginning? 
     completiondata: Optional[CompletionData] = None
-    contents: List[Content] = None  # Adding the contents attribute
-    # ... additional fields can be added as needed
+    contents: List[Content] = None 
 
 @dataclass
 class Section:
@@ -74,7 +73,6 @@ class RecentCourse:
     timeaccess: int
     showshortname: bool
     coursecategory: str
-    # ... additional fields can be added as needed
 
 
 

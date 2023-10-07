@@ -3,6 +3,7 @@ import os
 import re
 import click
 import datastructures as ds
+import validators
 
 def clean_filename(url):
     """
@@ -85,14 +86,15 @@ BANNER =  """
 
 click.echo(click.style(BANNER, fg='green'))
 @click.command()
-@click.option('--token', required=True, help='Insert your token from the LMS Settings Security-Key Page.')
-@click.option('--cid', required=False, help='The ID of the course to scrape PDFs from.')
-@click.option('--save_path', default=os.getcwd(), help='Path to save the PDFs. Defaults to current directory.')
+@click.option('--token', default=lambda: os.environ.get("MOODLE_TOKEN", ""), help='Insert your token from the LMS Settings Security-Key Page.')
+@click.option('--cid', required=False, help='The ID of the course to scrape data from.')
+@click.option('--save_path', default=os.getcwd(), help='Path to save the data. Defaults to current directory.')
 @click.option(
     "--url",
-    default=lambda: os.environ.get("MOODLE_URL", "")
+    default=lambda: os.environ.get("MOODLE_URL", ""),
+    help='Insert URL for LMS endpoint.'
 )
-def scrape_pdfs(cid, save_path, token, url):
+def scrape_data(cid, save_path, token, url):
     """
     CLI tool to scrape data from Moodle courses.
 
@@ -101,31 +103,51 @@ def scrape_pdfs(cid, save_path, token, url):
     
 
     if url == "":
-        return click.echo("Please set a URL endpoint, either with a environment variable or via the --url parameter.")
+        return click.secho("Please set a URL endpoint, either with a environment variable or via the --url argument.",
+                            fg='red')
+    elif token == "":
+        return click.secho("Please set a MOODLE_TOKEN, either with a environment variable or via the --token argument.",
+                            fg='red')
+    elif validators.url(url) is not True:
+        return click.secho("Not a valid URL. Please check your MOODLE_URL.",
+                            fg='red')
 
-    file_extensions = ['.pdf', '.PDF' , '.py', '.csv', '.xls', '.doc', '.ipynb', '.jpg', '.jpeg', '.png', '.md', '.html']
+    file_extensions = ['.pdf', '.PDF' , '.py', '.csv', '.xls', '.doc', '.docx', '.docm' '.ipynb',
+                         '.jpg', '.jpeg', '.png', '.md', '.html', '.ppt', '.pptx',
+                          '.ppt' , '.txt', '.jpg', 'jpeg', '.png', '.html', '.tex']
 
-    course_content_folder = os.path.join(save_path, "Course_Content")
-    assignments_folder = os.path.join(save_path, "Assignments")
-    os.makedirs(course_content_folder, exist_ok=True)
-    os.makedirs(assignments_folder, exist_ok=True)
 
+
+    
     try:
     
 
-        recent_courses_url = f"{url}?wstoken={token}&wsfunction=core_course_get_recent_courses&moodlewsrestformat=json"
+        recent_courses_url = f"{url}/moodle/webservice/rest/server.php?wstoken={token}&wsfunction=core_course_get_recent_courses&moodlewsrestformat=json"
+        assignments_content_url = f"{url}/moodle/webservice/rest/server.php?wstoken={token}&wsfunction=mod_assign_get_assignments&courseids[]={cid}&moodlewsrestformat=json"
+        
+        
         respose_recent_courses_response = requests.get(recent_courses_url)
+
+        # Check if token is valid
+        if b"invalidtoken" in respose_recent_courses_response.content:
+            return click.secho("Your provided Token seems invalid. Please check your MOODLE_TOKEN.",
+                                fg='red')
+
         respose_recent_courses_response.raise_for_status()
 
 
-        assignments_content_url = f"{url}?wstoken={token}&wsfunction=mod_assign_get_assignments&courseids[]={cid}&moodlewsrestformat=json"
 
         respose_assignments = requests.get(assignments_content_url)
-
         respose_assignments.raise_for_status()
 
         recent_course_contents = respose_recent_courses_response.json()
         recent_courses = [deserialize_recent_course(course_data) for course_data in recent_course_contents]
+
+        course_content_folder = os.path.join(save_path, "Course_Content")
+        assignments_folder = os.path.join(save_path, "Assignments")
+        os.makedirs(course_content_folder, exist_ok=True)
+        os.makedirs(assignments_folder, exist_ok=True)
+    
 
 
         def display_courses(recent_courses, cid) -> str:
@@ -234,4 +256,4 @@ def scrape_pdfs(cid, save_path, token, url):
     click.echo(f"Downloaded Files to {save_path}")
 
 if __name__ == '__main__':
-    scrape_pdfs()
+    scrape_data()
