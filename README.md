@@ -7,10 +7,13 @@ pip install -r requirements.txt
 ```
 
 Set your `MOODLE_TOKEN` and `MOODLE_URL`:
+
 ```
 export MOODLE_URL="https://moodle.domain.xyz"
 export MOODLE_TOKEN="1234567889"
 ```
+
+[How to find your Moodle Token?](docs/token.md)
 
 or you could provide these via arguments:
 ```
