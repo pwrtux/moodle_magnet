@@ -4,15 +4,31 @@ import re
 import click
 import datastructures as ds
 import validators
+from typing import List, Tuple, Optional
 
-def clean_filename(url):
+# Constants
+DEFAULT_FILE_EXTENSIONS = [
+    '.pdf', '.PDF', '.py', '.csv', '.xls', '.doc', '.docx', '.docm', '.ipynb',
+    '.jpg', '.jpeg', '.png', '.md', '.html', '.ppt', '.pptx', '.txt', '.tex'
+]
+
+BANNER = """
+███╗   ███╗ ██████╗  ██████╗ ██████╗ ██╗     ███████╗    ███╗   ███╗ █████╗  ██████╗ ███╗   ██╗███████╗████████╗
+████╗ ████║██╔═══██╗██╔═══██╗██╔══██╗██║     ██╔════╝    ████╗ ████║██╔══██╗██╔════╝ ████╗  ██║██╔════╝╚══██╔══╝
+██╔████╔██║██║   ██║██║   ██║██║  ██║██║     █████╗      ██╔████╔██║███████║██║  ███╗██╔██╗ ██║█████╗     ██║   
+██║╚██╔╝██║██║   ██║██║   ██║██║  ██║██║     ██╔══╝      ██║╚██╔╝██║██╔══██║██║   ██║██║╚██╗██║██╔══╝     ██║   
+██║ ╚═╝ ██║╚██████╔╝╚██████╔╝██████╔╝███████╗███████╗    ██║ ╚═╝ ██║██║  ██║╚██████╔╝██║ ╚████║███████╗   ██║   
+╚═╝     ╚═╝ ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝   ╚═╝                                                                                                                   
+"""
+
+def clean_filename(url: str) -> str:
     """
     Clean the filename extracted from the URL to remove tokens and unwanted characters.
     """
 
     filename = url.split('/')[-1]
     
-    filename = re.split('\?|&', filename)[0]
+    filename = re.split(r'\?|&', filename)[0]
 
     # Remove reserved characters for Windows
     filename = re.sub(r'[<>:"/\|?*]', '', filename)
@@ -56,7 +72,7 @@ def deserialize_recent_course(course_data: dict) -> ds.RecentCourse:
     return ds.RecentCourse(**relevant_data)
 
 
-def unpack_contents(sections):
+def unpack_contents(sections: List[ds.Section]) -> List[str]:
     for section in sections:
         for module in section.modules:
             if isinstance(module.contents, list):
@@ -71,6 +87,66 @@ def unpack_contents(sections):
                     filenames.append(content.filename)
 
     return filenames
+
+
+def validate_inputs(url: str, token: str) -> Optional[str]:
+    """Validate URL and token inputs. Returns error message if invalid, None if valid."""
+    if not url:
+        return "Please set a URL endpoint, either with a environment variable or via the --url argument."
+    if not token:
+        return "Please set a MOODLE_TOKEN, either with a environment variable or via the --token argument."
+    if not validators.url(url):
+        return "Not a valid URL. Please check your MOODLE_URL."
+    return None
+
+
+def build_moodle_url(base_url: str, endpoint: str, **params: str) -> str:
+    """Build a properly formatted Moodle API URL without token in URL."""
+    url = f"{base_url}/moodle/webservice/rest/server.php?wsfunction={endpoint}&moodlewsrestformat=json"
+    for key, value in params.items():
+        if value is not None:
+            url += f"&{key}={value}"
+    return url
+
+
+def make_moodle_request(url: str, token: str) -> requests.Response:
+    """Make a request to Moodle API with token in headers for security."""
+    # Note: Some Moodle installations may require token in URL for web services
+    # This is a more secure approach but may need fallback to URL-based token
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'User-Agent': 'MoodleMagnet/1.0'
+    }
+    
+    # Try with Authorization header first, fallback to URL parameter if needed
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 401:  # If unauthorized, try with token in URL
+            url_with_token = f"{url}&wstoken={token}" if '?' in url else f"{url}?wstoken={token}"
+            response = requests.get(url_with_token)
+        return response
+    except requests.RequestException:
+        # Fallback to URL-based token
+        url_with_token = f"{url}&wstoken={token}" if '?' in url else f"{url}?wstoken={token}"
+        return requests.get(url_with_token)
+
+
+def download_file(url: str, folder: str) -> None:
+    """Download a single file with error handling."""
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+
+        filename = os.path.join(folder, clean_filename(url))
+        
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                
+    except requests.RequestException as e:
+        click.echo(f"Error downloading {url}: {e}")
+    except IOError as e:
+        click.echo(f"Error saving {filename}: {e}")
 
 
 
@@ -94,53 +170,39 @@ click.echo(click.style(BANNER, fg='green'))
     default=lambda: os.environ.get("MOODLE_URL", ""),
     help='Insert URL for LMS endpoint.'
 )
-def scrape_data(cid, save_path, token, url):
+def scrape_data(cid: Optional[str], save_path: str, token: str, url: str) -> None:
     """
     CLI tool to scrape data from Moodle courses.
 
     Provide --token and --url argument and start the dumping your moodle files.
     """
-    
-
-    if url == "":
-        return click.secho("Please set a URL endpoint, either with a environment variable or via the --url argument.",
-                            fg='red')
-    elif token == "":
-        return click.secho("Please set a MOODLE_TOKEN, either with a environment variable or via the --token argument.",
-                            fg='red')
-    elif validators.url(url) is not True:
-        return click.secho("Not a valid URL. Please check your MOODLE_URL.",
-                            fg='red')
-
-    file_extensions = ['.pdf', '.PDF' , '.py', '.csv', '.xls', '.doc', '.docx', '.docm' '.ipynb',
-                         '.jpg', '.jpeg', '.png', '.md', '.html', '.ppt', '.pptx',
-                          '.ppt' , '.txt', '.jpg', 'jpeg', '.png', '.html', '.tex']
-
-
+    # Validate inputs
+    error_msg = validate_inputs(url, token)
+    if error_msg:
+        return click.secho(error_msg, fg='red')
 
     
     try:
-    
-
-        recent_courses_url = f"{url}/moodle/webservice/rest/server.php?wstoken={token}&wsfunction=core_course_get_recent_courses&moodlewsrestformat=json"
-        assignments_content_url = f"{url}/moodle/webservice/rest/server.php?wstoken={token}&wsfunction=mod_assign_get_assignments&courseids[]={cid}&moodlewsrestformat=json"
+        # Build API URLs using helper function
+        recent_courses_url = build_moodle_url(url, "core_course_get_recent_courses")
+        assignments_content_url = build_moodle_url(url, "mod_assign_get_assignments", **{"courseids[]": cid} if cid else {})
         
         
-        respose_recent_courses_response = requests.get(recent_courses_url)
+        response_recent_courses = make_moodle_request(recent_courses_url, token)
 
         # Check if token is valid
-        if b"invalidtoken" in respose_recent_courses_response.content:
+        if b"invalidtoken" in response_recent_courses.content:
             return click.secho("Your provided Token seems invalid. Please check your MOODLE_TOKEN.",
                                 fg='red')
 
-        respose_recent_courses_response.raise_for_status()
+        response_recent_courses.raise_for_status()
 
 
 
-        respose_assignments = requests.get(assignments_content_url)
-        respose_assignments.raise_for_status()
+        response_assignments = make_moodle_request(assignments_content_url, token)
+        response_assignments.raise_for_status()
 
-        recent_course_contents = respose_recent_courses_response.json()
+        recent_course_contents = response_recent_courses.json()
         recent_courses = [deserialize_recent_course(course_data) for course_data in recent_course_contents]
 
         course_content_folder = os.path.join(save_path, "Course_Content")
@@ -150,7 +212,7 @@ def scrape_data(cid, save_path, token, url):
     
 
 
-        def display_courses(recent_courses, cid) -> str:
+        def display_courses(recent_courses: List[ds.RecentCourse], cid: Optional[str]) -> str:
             if not cid:
                 click.echo("")
                 click.echo("You are in the following courses:")
@@ -168,13 +230,11 @@ def scrape_data(cid, save_path, token, url):
                 
                 value = click.prompt('Which course do you want to dump? [COURSE ID] ', type=int)
             else:
-                course_content_url = f"{url}?wstoken={token}&wsfunction=core_course_get_contents&courseid={cid}&moodlewsrestformat=json"
-                return course_content_url
+                return build_moodle_url(url, "core_course_get_contents", courseid=cid)
         
             if value and value in tmp_ids:
                 cid = value
-                course_content_url = f"{url}?wstoken={token}&wsfunction=core_course_get_contents&courseid={cid}&moodlewsrestformat=json"
-                return course_content_url
+                return build_moodle_url(url, "core_course_get_contents", courseid=str(cid))
             else:
                 click.echo('Invalid input :(. Please try again')
 
@@ -182,7 +242,7 @@ def scrape_data(cid, save_path, token, url):
 
 
         
-        response = requests.get(content_url)   
+        response = make_moodle_request(content_url, token)   
  
         response.raise_for_status()
        
@@ -225,11 +285,11 @@ def scrape_data(cid, save_path, token, url):
         return
 
     ####### DOWNLOAD PART
-    file_urls = []
+    file_urls: List[Tuple[str, str]] = []
     for section in course_contents:
         for module in section.get('modules', []):
             for content in module.get('contents', []):
-                if any(content['filename'].endswith(ext) for ext in file_extensions):
+                if any(content['filename'].endswith(ext) for ext in DEFAULT_FILE_EXTENSIONS):
                     file_urls.append((content['fileurl'] + f"?&token={token}", course_content_folder))
 
     if not file_urls:
@@ -237,21 +297,8 @@ def scrape_data(cid, save_path, token, url):
         return
 
     with click.progressbar(file_urls, label='Downloading Files') as bar:
-        for url,folder in bar:
-            try:
-                response = requests.get(url, stream=True)
-                response.raise_for_status()
-
-                filename = os.path.join(folder, clean_filename(url))
-                
-                with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        
-            except requests.RequestException as e:
-                click.echo(f"Error downloading {url}: {e}")
-            except IOError as e:
-                click.echo(f"Error saving {filename}: {e}")
+        for url, folder in bar:
+            download_file(url, folder)
 
     click.echo(f"Downloaded Files to {save_path}")
 
