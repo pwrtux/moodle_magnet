@@ -1,10 +1,13 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import os
 import re
 import click
 import datastructures as ds
 import validators
 from typing import List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Constants
 DEFAULT_FILE_EXTENSIONS = [
@@ -35,26 +38,66 @@ def clean_filename(url: str) -> str:
     
     return filename
 
+# Cache annotation keys for better performance
+_SECTION_KEYS = None
+_COMPLETION_DATA_KEYS = None
+_MODULE_KEYS = None
+_CONTENT_KEYS = None
+_RECENT_COURSE_KEYS = None
+
+def _get_section_keys():
+    global _SECTION_KEYS
+    if _SECTION_KEYS is None:
+        _SECTION_KEYS = set(ds.Section.__annotations__.keys())
+    return _SECTION_KEYS
+
+def _get_completion_data_keys():
+    global _COMPLETION_DATA_KEYS
+    if _COMPLETION_DATA_KEYS is None:
+        _COMPLETION_DATA_KEYS = set(ds.CompletionData.__annotations__.keys())
+    return _COMPLETION_DATA_KEYS
+
+def _get_module_keys():
+    global _MODULE_KEYS
+    if _MODULE_KEYS is None:
+        _MODULE_KEYS = set(ds.Module.__annotations__.keys())
+    return _MODULE_KEYS
+
+def _get_content_keys():
+    global _CONTENT_KEYS
+    if _CONTENT_KEYS is None:
+        _CONTENT_KEYS = set(ds.Content.__annotations__.keys())
+    return _CONTENT_KEYS
+
+def _get_recent_course_keys():
+    global _RECENT_COURSE_KEYS
+    if _RECENT_COURSE_KEYS is None:
+        _RECENT_COURSE_KEYS = set(ds.RecentCourse.__annotations__.keys())
+    return _RECENT_COURSE_KEYS
+
 def deserialize_section(section_data: dict) -> ds.Section:
     modules = [deserialize_module(
         module_data) for module_data in section_data.get('modules', [])]
 
     # Extract only the fields that match the Section dataclass attributes
+    keys = _get_section_keys()
     relevant_data = {
-        key: section_data[key] for key in ds.Section.__annotations__ if key in section_data}
+        key: section_data[key] for key in keys if key in section_data}
     relevant_data['modules'] = modules
 
     return ds.Section(**relevant_data)
 
 def deserialize_completion_data(completion_data_dict: dict) -> ds.CompletionData:
     # Extract only the fields that match the CompletionData dataclass attributes
+    keys = _get_completion_data_keys()
     relevant_data = {
-        key: completion_data_dict[key] for key in ds.CompletionData.__annotations__ if key in completion_data_dict}
+        key: completion_data_dict[key] for key in keys if key in completion_data_dict}
     return ds.CompletionData(**relevant_data)
 
 def deserialize_module(module_data: dict) -> ds.Module:
+    keys = _get_module_keys()
     relevant_data = {
-        key: module_data[key] for key in ds.Module.__annotations__ if key in module_data}
+        key: module_data[key] for key in keys if key in module_data}
 
     if 'completiondata' in module_data:
         relevant_data['completiondata'] = deserialize_completion_data(
@@ -64,25 +107,39 @@ def deserialize_module(module_data: dict) -> ds.Module:
 
 
 def deserialize_content(content_data: dict) -> ds.Content:
-    relevant_data = {key: content_data[key] for key in ds.Content.__annotations__ if key in content_data}
+    keys = _get_content_keys()
+    relevant_data = {key: content_data[key] for key in keys if key in content_data}
     return ds.Content(**relevant_data)
 
 def deserialize_recent_course(course_data: dict) -> ds.RecentCourse:
-    relevant_data = {key: course_data[key] for key in ds.RecentCourse.__annotations__ if key in course_data}
+    keys = _get_recent_course_keys()
+    relevant_data = {key: course_data[key] for key in keys if key in course_data}
     return ds.RecentCourse(**relevant_data)
 
 
 def unpack_contents(sections: List[ds.Section]) -> List[str]:
+    """Unpack contents from sections and return list of filenames.
+    
+    Optimized to do deserialization and collection in a single pass.
+    """
+    filenames = []
+    
     for section in sections:
         for module in section.modules:
             if isinstance(module.contents, list):
-                module.contents = [deserialize_content(content_data) if isinstance(content_data, dict) else content_data for content_data in module.contents]
-
-    filenames = []
-
-    for section in sections:
-        for module in section.modules:
-            if module.contents: 
+                # Deserialize contents and collect filenames in one pass
+                deserialized_contents = []
+                for content_data in module.contents:
+                    if isinstance(content_data, dict):
+                        content = deserialize_content(content_data)
+                        deserialized_contents.append(content)
+                        filenames.append(content.filename)
+                    else:
+                        deserialized_contents.append(content_data)
+                        filenames.append(content_data.filename)
+                module.contents = deserialized_contents
+            elif module.contents:
+                # Already deserialized, just collect filenames
                 for content in module.contents:
                     filenames.append(content.filename)
 
@@ -131,10 +188,41 @@ def make_moodle_request(url: str, token: str) -> requests.Response:
         return requests.get(url_with_token)
 
 
-def download_file(url: str, folder: str) -> None:
-    """Download a single file with error handling."""
+def create_download_session() -> requests.Session:
+    """Create a requests session with connection pooling and retry logic."""
+    session = requests.Session()
+    
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    
+    # Mount adapter with connection pooling
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=10,
+        pool_maxsize=20
+    )
+    
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+
+def download_file(url: str, folder: str, session: Optional[requests.Session] = None) -> Tuple[bool, str]:
+    """Download a single file with error handling.
+    
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    if session is None:
+        session = requests
+        
     try:
-        response = requests.get(url, stream=True)
+        response = session.get(url, stream=True, timeout=30)
         response.raise_for_status()
 
         filename = os.path.join(folder, clean_filename(url))
@@ -142,25 +230,48 @@ def download_file(url: str, folder: str) -> None:
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        
+        return True, filename
                 
     except requests.RequestException as e:
-        click.echo(f"Error downloading {url}: {e}")
+        return False, f"Error downloading {url}: {e}"
     except IOError as e:
-        click.echo(f"Error saving {filename}: {e}")
+        return False, f"Error saving file: {e}"
+
+
+def download_files_parallel(file_urls: List[Tuple[str, str]], max_workers: int = 5) -> List[Tuple[bool, str]]:
+    """Download multiple files in parallel using a thread pool.
+    
+    Args:
+        file_urls: List of (url, folder) tuples
+        max_workers: Maximum number of concurrent downloads
+        
+    Returns:
+        List of (success, message) tuples for each download
+    """
+    session = create_download_session()
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all download tasks
+        future_to_url = {
+            executor.submit(download_file, url, folder, session): (url, folder)
+            for url, folder in file_urls
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_url):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                url, _ = future_to_url[future]
+                results.append((False, f"Unexpected error for {url}: {e}"))
+    
+    return results
 
 
 
-BANNER =  """
-███╗   ███╗ ██████╗  ██████╗ ██████╗ ██╗     ███████╗    ███╗   ███╗ █████╗  ██████╗ ███╗   ██╗███████╗████████╗
-████╗ ████║██╔═══██╗██╔═══██╗██╔══██╗██║     ██╔════╝    ████╗ ████║██╔══██╗██╔════╝ ████╗  ██║██╔════╝╚══██╔══╝
-██╔████╔██║██║   ██║██║   ██║██║  ██║██║     █████╗      ██╔████╔██║███████║██║  ███╗██╔██╗ ██║█████╗     ██║   
-██║╚██╔╝██║██║   ██║██║   ██║██║  ██║██║     ██╔══╝      ██║╚██╔╝██║██╔══██║██║   ██║██║╚██╗██║██╔══╝     ██║   
-██║ ╚═╝ ██║╚██████╔╝╚██████╔╝██████╔╝███████╗███████╗    ██║ ╚═╝ ██║██║  ██║╚██████╔╝██║ ╚████║███████╗   ██║   
-╚═╝     ╚═╝ ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝   ╚═╝                                                                                                                   
-"""
-
-
-click.echo(click.style(BANNER, fg='green'))
 @click.command()
 @click.option('--token', default=lambda: os.environ.get("MOODLE_TOKEN", ""), help='Insert your token from the LMS Settings Security-Key Page.')
 @click.option('--cid', required=False, help='The ID of the course to scrape data from.')
@@ -176,6 +287,9 @@ def scrape_data(cid: Optional[str], save_path: str, token: str, url: str) -> Non
 
     Provide --token and --url argument and start the dumping your moodle files.
     """
+    # Display banner
+    click.echo(click.style(BANNER, fg='green'))
+    
     # Validate inputs
     error_msg = validate_inputs(url, token)
     if error_msg:
@@ -285,22 +399,40 @@ def scrape_data(cid: Optional[str], save_path: str, token: str, url: str) -> Non
         return
 
     ####### DOWNLOAD PART
+    # Pre-compile extension check set for faster lookup
+    extension_set = set(DEFAULT_FILE_EXTENSIONS)
+    
+    # Use deserialized sections instead of raw JSON data
     file_urls: List[Tuple[str, str]] = []
-    for section in course_contents:
-        for module in section.get('modules', []):
-            for content in module.get('contents', []):
-                if any(content['filename'].endswith(ext) for ext in DEFAULT_FILE_EXTENSIONS):
-                    file_urls.append((content['fileurl'] + f"?&token={token}", course_content_folder))
+    for section in sections:
+        for module in section.modules:
+            if module.contents:
+                for content in module.contents:
+                    # Check if file extension matches using set lookup (O(1) vs O(n))
+                    if any(content.filename.endswith(ext) for ext in extension_set):
+                        file_urls.append((content.fileurl + f"?&token={token}", course_content_folder))
 
     if not file_urls:
         click.echo("No Files found in the specified course.")
         return
 
-    with click.progressbar(file_urls, label='Downloading Files') as bar:
-        for url, folder in bar:
-            download_file(url, folder)
-
-    click.echo(f"Downloaded Files to {save_path}")
+    # Use parallel downloads for better performance
+    click.echo(f"Downloading {len(file_urls)} files...")
+    results = download_files_parallel(file_urls, max_workers=5)
+    
+    # Report results
+    successful = sum(1 for success, _ in results if success)
+    failed = len(results) - successful
+    
+    click.echo(f"✓ Successfully downloaded {successful} files to {save_path}")
+    if failed > 0:
+        click.echo(f"✗ Failed to download {failed} files")
+        # Show first few errors
+        errors = [msg for success, msg in results if not success]
+        for error in errors[:3]:
+            click.echo(f"  - {error}")
+        if len(errors) > 3:
+            click.echo(f"  ... and {len(errors) - 3} more errors")
 
 if __name__ == '__main__':
     scrape_data()
