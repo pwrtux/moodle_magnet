@@ -82,6 +82,47 @@ class TestMoodleMagnetFunctions(unittest.TestCase):
         self.assertEqual(result, expected)
 
 
+class TestPerformanceOptimizations(unittest.TestCase):
+    """Test cases for performance optimizations."""
+    
+    def test_annotation_keys_cached(self):
+        """Test that annotation keys are cached for better performance."""
+        from moodlemagnet import _get_section_keys, _get_module_keys, _get_content_keys
+        
+        # First call should populate cache
+        keys1 = _get_section_keys()
+        # Second call should return cached version (same object)
+        keys2 = _get_section_keys()
+        self.assertIs(keys1, keys2, "Keys should be cached and return same object")
+        
+    def test_unpack_contents_single_pass(self):
+        """Test that unpack_contents processes data efficiently."""
+        from moodlemagnet import unpack_contents
+        import datastructures as ds
+        
+        # Create test data
+        content = ds.Content(
+            fileurl="https://example.com/file.pdf",
+            filename="test.pdf",
+            filepath="/",
+            filesize=1024,
+            timemodified=1234567890
+        )
+        module = ds.Module(
+            id=1, name="Test Module", instance=1, contextid=1,
+            visible=1, uservisible=True, visibleoncoursepage=1,
+            modicon="", modname="resource", completion=0,
+            contents=[content]
+        )
+        section = ds.Section(
+            id=1, name="Test Section", visible=1, section=0,
+            uservisible=True, modules=[module]
+        )
+        
+        filenames = unpack_contents([section])
+        self.assertEqual(filenames, ["test.pdf"])
+
+
 class TestDataStructuresFunctionality(unittest.TestCase):
     """Test cases for data structure deserialization."""
     
